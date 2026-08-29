@@ -42,7 +42,6 @@ class SimpleLidarAvoider(Node):
 
         self.prev_steering = 0.0
 
-
     # ------------------------------------------------------
     # Helper function: publish command
     # ------------------------------------------------------
@@ -134,7 +133,7 @@ class SimpleLidarAvoider(Node):
 
 
     # ------------------------------------------------------
-    # Main callback
+    # Simple, direct control: process each scan and publish once
     # ------------------------------------------------------
     def scan_callback(self, msg):
         ranges, valid = self.get_valid_ranges(msg)
@@ -145,9 +144,6 @@ class SimpleLidarAvoider(Node):
 
         nearest = np.min(np.where(valid, ranges, 100.0))
 
-        # --------------------------------------------------
-        # If something is very close, stop and turn away
-        # --------------------------------------------------
         if nearest < self.stop_distance:
             direction, steering = self.choose_direction(ranges, valid)
 
@@ -159,14 +155,8 @@ class SimpleLidarAvoider(Node):
                 self.publish_drive(0.0, 0.0)
             return
 
-        # --------------------------------------------------
-        # Choose best direction
-        # --------------------------------------------------
         direction, steering = self.choose_direction(ranges, valid)
 
-        # --------------------------------------------------
-        # Simple speed logic
-        # --------------------------------------------------
         if direction == "center":
             speed = self.max_speed
         else:
@@ -175,9 +165,6 @@ class SimpleLidarAvoider(Node):
         if abs(steering) > 0.3:
             speed = max(self.min_speed, speed * 0.7)
 
-        # --------------------------------------------------
-        # Smooth steering a little
-        # --------------------------------------------------
         steering = 0.7 * self.prev_steering + 0.3 * steering
         self.prev_steering = steering
 
