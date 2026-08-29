@@ -1,0 +1,3 @@
+[submodule "references/giu_gap_follower"]
+	path = references/giu_gap_follower
+	url = https://github.com/GIU-F1Tenth/gap_follower.git
