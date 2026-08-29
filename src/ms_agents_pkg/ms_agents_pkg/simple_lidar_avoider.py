@@ -31,7 +31,7 @@ class SimpleLidarAvoider(Node):
         # --------------------------------------------------
         # Driving settings
         # --------------------------------------------------
-        self.max_speed = 1.8
+        self.max_speed = 2.0
         self.min_speed = 0.5
 
         self.stop_distance = 0.5
