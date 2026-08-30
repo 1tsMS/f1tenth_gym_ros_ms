@@ -25,6 +25,10 @@ setup(
             'safety_braking_agent = ms_agents_pkg.safety_braking_agent:main',
             'pid_wall_follower = ms_agents_pkg.pid_wall_follower:main',
             'gap_follower = ms_agents_pkg.gap_follower:main',
+            'waypoint_logger = ms_agents_pkg.waypoint_logger:main',
+            'smooth_waypoints = ms_agents_pkg.smooth_waypoints:main',
+            'keyboard_teleop = ms_agents_pkg.keyboard_teleop:main',
+            'pure_pursuit = ms_agents_pkg.pure_pursuit:main',
         ],
     },
 )
