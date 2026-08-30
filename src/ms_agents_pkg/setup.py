@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'drive_agent = ms_agents_pkg.drive_agent:main',
             'simple_lidar_avoider = ms_agents_pkg.simple_lidar_avoider:main',
+            'safety_braking_agent = ms_agents_pkg.safety_braking_agent:main',
         ],
     },
 )

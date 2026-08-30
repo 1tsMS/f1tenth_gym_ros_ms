@@ -9,12 +9,14 @@ from ackermann_msgs.msg import AckermannDriveStamped
 
 
 class SimpleLidarAvoider(Node):
+
     def __init__(self):
         super().__init__("simple_lidar_avoider")
 
         # --------------------------------------------------
         # ROS setup
         # --------------------------------------------------
+
         self.scan_sub = self.create_subscription(
             LaserScan,
             "/scan",
@@ -31,153 +33,289 @@ class SimpleLidarAvoider(Node):
         # --------------------------------------------------
         # Driving settings
         # --------------------------------------------------
+
         self.max_speed = 2.0
         self.min_speed = 0.5
 
-        self.stop_distance = 0.5
-        self.safe_distance = 2.0
+        # Start turning when something is closer than this
+        self.front_trigger_distance = 1.0
+
+        # Hard emergency distance
+        self.stop_distance = 0.25
 
         self.left_steer = 0.55
         self.right_steer = -0.55
 
-        self.prev_steering = 0.0
+    # ------------------------------------------------------
+    # Publish drive command
+    # ------------------------------------------------------
 
-    # ------------------------------------------------------
-    # Helper function: publish command
-    # ------------------------------------------------------
     def publish_drive(self, speed, steering_angle):
+
         msg = AckermannDriveStamped()
+
         msg.drive.speed = float(speed)
         msg.drive.steering_angle = float(steering_angle)
+
         self.drive_pub.publish(msg)
 
+    # ------------------------------------------------------
+    # Clean LiDAR data
+    # ------------------------------------------------------
 
-    # ------------------------------------------------------
-    # Helper function: clean LiDAR data
-    # ------------------------------------------------------
     def get_valid_ranges(self, scan_msg):
-        ranges = np.asarray(scan_msg.ranges, dtype=np.float32)
+
+        ranges = np.asarray(
+            scan_msg.ranges,
+            dtype=np.float32
+        )
 
         valid = np.isfinite(ranges)
-        valid &= (ranges > 0.2)
-        valid &= (ranges < 20.0)
+
+        valid &= ranges >= scan_msg.range_min
+        valid &= ranges <= scan_msg.range_max
 
         return ranges, valid
 
-
     # ------------------------------------------------------
-    # Helper function: get a sector of lidar data
+    # Choose direction
     # ------------------------------------------------------
-    def get_sector(self, ranges, valid, start_index, end_index):
-        start_index = max(0, start_index)
-        end_index = min(len(ranges), end_index)
 
-        sector_ranges = np.full(end_index - start_index, 20.0, dtype=np.float32)
-        sector_valid = np.zeros(end_index - start_index, dtype=bool)
-
-        if start_index < end_index:
-            sector_ranges[:] = ranges[start_index:end_index]
-            sector_valid[:] = valid[start_index:end_index]
-
-        return sector_ranges, sector_valid
-
-
-    # ------------------------------------------------------
-    # Helper function: choose safest direction
-    # ------------------------------------------------------
     def choose_direction(self, ranges, valid):
+
         if not np.any(valid):
             return "stop", 0.0
 
-        center_index = len(ranges) // 2
-
-        left_width = len(ranges) // 6
-        right_width = len(ranges) // 6
-
-        left_start = max(0, center_index - left_width)
-        left_end = center_index
-
-        right_start = center_index
-        right_end = min(len(ranges), center_index + right_width)
-
-        center_start = max(0, center_index - 20)
-        center_end = min(len(ranges), center_index + 20)
-
-        left_ranges, left_valid = self.get_sector(ranges, valid, left_start, left_end)
-        right_ranges, right_valid = self.get_sector(ranges, valid, right_start, right_end)
-        center_ranges, center_valid = self.get_sector(ranges, valid, center_start, center_end)
-
-        left_open = np.min(np.where(left_valid, left_ranges, 100.0))
-        right_open = np.min(np.where(right_valid, right_ranges, 100.0))
-        center_open = np.min(np.where(center_valid, center_ranges, 100.0))
+        center = len(ranges) // 2
 
         # --------------------------------------------------
-        # Emergency stop if obstacle is too close
+        # IMPORTANT:
+        #
+        # LaserScan angle increases counter-clockwise.
+        #
+        # negative angles = RIGHT
+        # positive angles = LEFT
+        #
+        # Therefore:
+        #
+        # ranges BEFORE center = RIGHT
+        # ranges AFTER center   = LEFT
         # --------------------------------------------------
-        nearest = np.min(np.where(valid, ranges, 100.0))
-        if nearest < self.stop_distance:
-            if left_open > right_open:
-                return "left", self.left_steer
-            else:
-                return "right", self.right_steer
+
+        side_width = len(ranges) // 6
+
+        # RIGHT
+        right_start = max(0, center - side_width)
+        right_end = center
+
+        # LEFT
+        left_start = center
+        left_end = min(len(ranges), center + side_width)
 
         # --------------------------------------------------
-        # Otherwise choose the direction with the most space
+        # Forward sector
+        #
+        # Only look at a narrow region directly ahead.
         # --------------------------------------------------
-        if center_open >= left_open and center_open >= right_open:
+
+        front_width = 40
+
+        front_start = max(0, center - front_width)
+        front_end = min(len(ranges), center + front_width)
+
+        right_ranges = ranges[right_start:right_end]
+        right_valid = valid[right_start:right_end]
+
+        left_ranges = ranges[left_start:left_end]
+        left_valid = valid[left_start:left_end]
+
+        front_ranges = ranges[front_start:front_end]
+        front_valid = valid[front_start:front_end]
+
+        # --------------------------------------------------
+        # Calculate clearances
+        #
+        # Use MAXIMUM distance because we want to know
+        # which direction has the most open space.
+        # --------------------------------------------------
+
+        right_clearance = np.max(
+            np.where(
+                right_valid,
+                right_ranges,
+                20.0
+            )
+        )
+
+        left_clearance = np.max(
+            np.where(
+                left_valid,
+                left_ranges,
+                20.0
+            )
+        )
+
+        # Closest obstacle directly ahead
+        front_distance = np.min(
+            np.where(
+                front_valid,
+                front_ranges,
+                20.0
+            )
+        )
+
+        # --------------------------------------------------
+        # Debug information
+        # --------------------------------------------------
+
+        self.get_logger().info(
+            f"front={front_distance:.2f} m | "
+            f"left={left_clearance:.2f} m | "
+            f"right={right_clearance:.2f} m"
+        )
+
+        # --------------------------------------------------
+        # Nothing in front
+        # --------------------------------------------------
+
+        if front_distance > self.front_trigger_distance:
+
             return "center", 0.0
-        elif left_open >= right_open:
-            return "left", self.left_steer
-        else:
+
+        # --------------------------------------------------
+        # Obstacle in front
+        #
+        # Choose the side with more open space.
+        # --------------------------------------------------
+
+        if right_clearance > left_clearance:
+
             return "right", self.right_steer
 
+        else:
+
+            return "left", self.left_steer
 
     # ------------------------------------------------------
-    # Simple, direct control: process each scan and publish once
+    # LiDAR callback
     # ------------------------------------------------------
+
     def scan_callback(self, msg):
+
         ranges, valid = self.get_valid_ranges(msg)
 
         if not np.any(valid):
-            self.publish_drive(0.0, 0.0)
+
+            self.publish_drive(
+                0.0,
+                0.0
+            )
+
             return
 
-        nearest = np.min(np.where(valid, ranges, 100.0))
+        # --------------------------------------------------
+        # Find closest LiDAR return
+        # --------------------------------------------------
+
+        nearest = np.min(
+            np.where(
+                valid,
+                ranges,
+                20.0
+            )
+        )
+
+        direction, steering = self.choose_direction(
+            ranges,
+            valid
+        )
+
+        # --------------------------------------------------
+        # Emergency stop
+        #
+        # Only stop if something is extremely close.
+        # --------------------------------------------------
 
         if nearest < self.stop_distance:
-            direction, steering = self.choose_direction(ranges, valid)
 
-            if direction == "left":
-                self.publish_drive(0.0, self.left_steer)
-            elif direction == "right":
-                self.publish_drive(0.0, self.right_steer)
-            else:
-                self.publish_drive(0.0, 0.0)
+            self.get_logger().warn(
+                f"EMERGENCY STOP - nearest={nearest:.2f} m"
+            )
+
+            self.publish_drive(
+                0.0,
+                0.0
+            )
+
             return
 
-        direction, steering = self.choose_direction(ranges, valid)
+        # --------------------------------------------------
+        # Normal driving
+        # --------------------------------------------------
 
         if direction == "center":
+
             speed = self.max_speed
-        else:
+
+        elif direction == "left":
+
             speed = self.max_speed * 0.7
 
-        if abs(steering) > 0.3:
-            speed = max(self.min_speed, speed * 0.7)
+        elif direction == "right":
 
-        steering = 0.7 * self.prev_steering + 0.3 * steering
-        self.prev_steering = steering
+            speed = self.max_speed * 0.7
 
-        self.publish_drive(speed, steering)
+        else:
 
+            speed = 0.0
+            steering = 0.0
+
+        # --------------------------------------------------
+        # Publish immediately.
+        #
+        # No steering smoothing for now.
+        #
+        # This makes debugging easier:
+        #
+        # right decision -> immediately -0.55
+        # left decision  -> immediately +0.55
+        # --------------------------------------------------
+
+        self.publish_drive(
+            speed,
+            steering
+        )
+
+    # ------------------------------------------------------
+    # Main
+    # ------------------------------------------------------
 
 def main(args=None):
+
     rclpy.init(args=args)
+
     node = SimpleLidarAvoider()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    try:
+
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+
+        pass
+
+    finally:
+
+        node.publish_drive(
+            0.0,
+            0.0
+        )
+
+        node.destroy_node()
+
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
+
     main()
