@@ -24,6 +24,7 @@ setup(
             'simple_lidar_avoider = ms_agents_pkg.simple_lidar_avoider:main',
             'safety_braking_agent = ms_agents_pkg.safety_braking_agent:main',
             'pid_wall_follower = ms_agents_pkg.pid_wall_follower:main',
+            'gap_follower = ms_agents_pkg.gap_follower:main',
         ],
     },
 )
