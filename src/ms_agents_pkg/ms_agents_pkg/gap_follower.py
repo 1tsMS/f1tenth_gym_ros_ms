@@ -44,8 +44,9 @@ class GapFollower(Node):
         # Follow The Gap (FTG) Settings
         # --------------------------------------------------
 
-        # Field of View (FOV): ±70 degrees (radians)
-        self.fov_angle = np.radians(70.0)
+
+        # Field of View (FOV): ±80 degrees (radians)
+        self.fov_angle = np.radians(80.0)
 
         # Forward obstacle sector: only bubble obstacles within ±45° ahead
         self.forward_cone_angle = np.radians(45.0)
@@ -112,7 +113,7 @@ class GapFollower(Node):
         # Clamp max range
         smoothed_ranges = np.clip(smoothed_ranges, 0.0, self.max_lidar_range)
 
-        # Crop to FOV (±70 degrees)
+        # Crop to FOV (±80 degrees)
         fov_mask = (angles >= -self.fov_angle) & (angles <= self.fov_angle)
 
         return smoothed_ranges[fov_mask], angles[fov_mask]

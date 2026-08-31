@@ -251,20 +251,27 @@ class PurePursuitAgent(Node):
         # 2. Transform goal to vehicle local coordinates
         x_local, y_local = self.transform_to_local_frame(gx, gy, car_x, car_y, car_yaw)
 
-        # 3. Calculate steering angle
-        steering = self.compute_pure_pursuit_steering(x_local, y_local, lookahead)
+        # 3. Calculate steering angle & smooth
+        raw_steering = self.compute_pure_pursuit_steering(x_local, y_local, lookahead)
+        smoothed_steering = (self.smoothing_alpha * self.prev_steering) + ((1.0 - self.smoothing_alpha) * raw_steering)
+        self.prev_steering = smoothed_steering
 
-        # 4. Status log
+        # 4. Cornering speed safety
+        if np.abs(smoothed_steering) > 0.14:
+
+            target_speed = min(target_speed, 1.8)
+
+        # 5. Status log
         self.get_logger().info(
-            f"Car: ({car_x:+.2f}, {car_y:+.2f}) | Steer: {np.degrees(steering):+5.1f}° | "
+            f"Car: ({car_x:+.2f}, {car_y:+.2f}) | Steer: {np.degrees(smoothed_steering):+5.1f}° | "
             f"Speed: {target_speed:.1f} m/s | L_look: {lookahead:.2f} m",
             throttle_duration_sec=0.4
         )
 
-        # 5. Publish drive command
+        # 6. Publish drive command
         self.publish_drive(
             target_speed,
-            steering
+            smoothed_steering
         )
 
 
