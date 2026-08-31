@@ -70,15 +70,19 @@ class PurePursuitAgent(Node):
         self.wheelbase = 0.33
 
         # Lookahead limits (meters)
-        self.min_lookahead = 0.75
-        self.max_lookahead = 1.35
-        self.lookahead_ratio = 0.30  # L = ratio * speed
+        self.min_lookahead = 0.65
+        self.max_lookahead = 1.25
+        self.lookahead_ratio = 0.25  # L = ratio * speed
 
         # Default speed (m/s)
         self.default_speed = 3.5
 
         # Maximum steering angle limits (~24 degrees)
         self.max_steer = 0.4189
+
+        # Steering smoothing filter
+        self.smoothing_alpha = 0.70
+        self.prev_steering = 0.0
 
         # --------------------------------------------------
         # Load Waypoints from CSV
@@ -153,7 +157,7 @@ class PurePursuitAgent(Node):
         return float(np.arctan2(siny_cosp, cosy_cosp))
 
     # ------------------------------------------------------
-    # Step 1: Find Goal Waypoint with Dynamic Lookahead
+    # Step 1: Find Goal Waypoint with Anticipatory Braking
     # ------------------------------------------------------
 
     def find_goal_waypoint(self, car_x, car_y, current_speed):
@@ -168,6 +172,8 @@ class PurePursuitAgent(Node):
         closest_idx = np.argmin(distances)
         num_points = len(self.waypoints)
 
+        target_idx = closest_idx
+
         # Search forward along the track for the first point >= lookahead distance
         for i in range(num_points):
 
@@ -175,9 +181,21 @@ class PurePursuitAgent(Node):
 
             if distances[idx] >= lookahead:
 
-                return self.waypoints[idx, 0], self.waypoints[idx, 1], self.waypoints[idx, 2], lookahead
+                target_idx = idx
+                break
 
-        return self.waypoints[closest_idx, 0], self.waypoints[closest_idx, 1], self.waypoints[closest_idx, 2], lookahead
+        gx = self.waypoints[target_idx, 0]
+        gy = self.waypoints[target_idx, 1]
+
+        # Anticipatory Braking: Check minimum speed ahead
+        target_speed = self.waypoints[target_idx, 2]
+
+        for offset in range(1, 18):
+
+            ahead_idx = (target_idx + offset) % num_points
+            target_speed = min(target_speed, self.waypoints[ahead_idx, 2])
+
+        return gx, gy, target_speed, lookahead
 
     # ------------------------------------------------------
     # Step 2: Transform Goal Point to Car's Local Body Frame
