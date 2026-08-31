@@ -240,11 +240,17 @@ class GymBridge(Node):
             and time.monotonic() - self.opp_last_command_time < 0.2
             if self.has_opp else False)
 
-        if self.ego_drive_published and ego_command_fresh and not self.has_opp:
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed]]))
-        elif (self.ego_drive_published and ego_command_fresh and self.has_opp
-              and self.opp_drive_published and opp_command_fresh):
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed], [self.opp_steer, self.opp_requested_speed]]))
+        if not self.has_opp:
+            if self.ego_drive_published and ego_command_fresh:
+                self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed]]))
+        else:
+            ego_steer = self.ego_steer if (self.ego_drive_published and ego_command_fresh) else 0.0
+            ego_speed = self.ego_requested_speed if (self.ego_drive_published and ego_command_fresh) else 0.0
+            opp_steer = self.opp_steer if (self.opp_drive_published and opp_command_fresh) else 0.0
+            opp_speed = self.opp_requested_speed if (self.opp_drive_published and opp_command_fresh) else 0.0
+
+            if (self.ego_drive_published and ego_command_fresh) or (self.opp_drive_published and opp_command_fresh):
+                self.obs, _, self.done, _ = self.env.step(np.array([[ego_steer, ego_speed], [opp_steer, opp_speed]]))
         self._update_sim_state()
 
     def timer_callback(self):

@@ -29,6 +29,8 @@ setup(
             'smooth_waypoints = ms_agents_pkg.smooth_waypoints:main',
             'keyboard_teleop = ms_agents_pkg.keyboard_teleop:main',
             'pure_pursuit = ms_agents_pkg.pure_pursuit:main',
+            'dynamic_overtaker = ms_agents_pkg.dynamic_overtaker:main',
+            'reset_cars = ms_agents_pkg.reset_cars:main',
         ],
     },
 )
