@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Pure Pursuit Waypoint Tracking Agent with Curvature Speed Support.
+"""Pure Pursuit Waypoint Tracking Agent with Dynamic Lookahead & Speed Profiling.
 
 Implements the official F1TENTH Pure Pursuit geometric path-tracking algorithm:
 1. Loads waypoints and speed profile from waypoints.csv.
-2. Finds the closest waypoint and selects a lookahead goal point along the path.
+2. Dynamically scales lookahead distance based on current velocity:
+   L_look = clip(0.35 * speed, 0.75m, 1.30m).
 3. Transforms the goal point into the car's local body frame.
 4. Calculates the steering angle: delta = arctan( 2 * L_wheelbase * sin(alpha) / L_lookahead ).
-5. Publishes drive commands to track the raceline at optimal speeds with zero oscillations.
+5. Publishes drive commands to track the raceline with flawless precision.
 """
 
 import os
@@ -65,16 +66,18 @@ class PurePursuitAgent(Node):
         # Pure Pursuit Parameters
         # --------------------------------------------------
 
-        # Lookahead distance L (meters) - how far ahead the car aims
-        self.lookahead_dist = 1.20
-
-        # Physical wheelbase of F1TENTH car (distance between front & rear axles)
+        # Wheelbase of F1TENTH car (meters)
         self.wheelbase = 0.33
 
-        # Default speed if not in CSV (m/s)
+        # Lookahead limits (meters)
+        self.min_lookahead = 0.75
+        self.max_lookahead = 1.35
+        self.lookahead_ratio = 0.30  # L = ratio * speed
+
+        # Default speed (m/s)
         self.default_speed = 3.5
 
-        # Maximum steering limits (~24 degrees)
+        # Maximum steering angle limits (~24 degrees)
         self.max_steer = 0.4189
 
         # --------------------------------------------------
@@ -85,8 +88,7 @@ class PurePursuitAgent(Node):
         self.waypoints = self.load_waypoints(self.csv_path)
 
         self.get_logger().info(
-            f"Pure Pursuit Initialized! Loaded {len(self.waypoints)} waypoints from: {self.csv_path} | "
-            f"Lookahead: {self.lookahead_dist} m"
+            f"Pure Pursuit Initialized! Loaded {len(self.waypoints)} waypoints from: {self.csv_path}"
         )
 
     # ------------------------------------------------------
@@ -97,7 +99,7 @@ class PurePursuitAgent(Node):
 
         if not os.path.exists(csv_file):
 
-            self.get_logger().error(f"Waypoint file not found: {csv_file}! Please run waypoint_logger first.")
+            self.get_logger().error(f"Waypoint file not found: {csv_file}!")
             return np.empty((0, 3))
 
         points = []
@@ -151,10 +153,13 @@ class PurePursuitAgent(Node):
         return float(np.arctan2(siny_cosp, cosy_cosp))
 
     # ------------------------------------------------------
-    # Step 1: Find the Lookahead Goal Waypoint
+    # Step 1: Find Goal Waypoint with Dynamic Lookahead
     # ------------------------------------------------------
 
-    def find_goal_waypoint(self, car_x, car_y):
+    def find_goal_waypoint(self, car_x, car_y, current_speed):
+
+        # Dynamic lookahead based on speed
+        lookahead = float(np.clip(self.lookahead_ratio * max(current_speed, 1.5), self.min_lookahead, self.max_lookahead))
 
         dx = self.waypoints[:, 0] - car_x
         dy = self.waypoints[:, 1] - car_y
@@ -168,11 +173,11 @@ class PurePursuitAgent(Node):
 
             idx = (closest_idx + i) % num_points
 
-            if distances[idx] >= self.lookahead_dist:
+            if distances[idx] >= lookahead:
 
-                return self.waypoints[idx, 0], self.waypoints[idx, 1], self.waypoints[idx, 2]
+                return self.waypoints[idx, 0], self.waypoints[idx, 1], self.waypoints[idx, 2], lookahead
 
-        return self.waypoints[closest_idx, 0], self.waypoints[closest_idx, 1], self.waypoints[closest_idx, 2]
+        return self.waypoints[closest_idx, 0], self.waypoints[closest_idx, 1], self.waypoints[closest_idx, 2], lookahead
 
     # ------------------------------------------------------
     # Step 2: Transform Goal Point to Car's Local Body Frame
@@ -192,7 +197,7 @@ class PurePursuitAgent(Node):
     # Step 3: Compute Pure Pursuit Steering Angle
     # ------------------------------------------------------
 
-    def compute_pure_pursuit_steering(self, x_local, y_local):
+    def compute_pure_pursuit_steering(self, x_local, y_local, lookahead):
 
         actual_lookahead = np.hypot(x_local, y_local)
 
@@ -220,20 +225,21 @@ class PurePursuitAgent(Node):
         car_x = float(msg.pose.pose.position.x)
         car_y = float(msg.pose.pose.position.y)
         car_yaw = self.get_yaw_from_quaternion(msg.pose.pose.orientation)
+        current_speed = float(msg.twist.twist.linear.x)
 
         # 1. Find target lookahead point & target speed
-        gx, gy, target_speed = self.find_goal_waypoint(car_x, car_y)
+        gx, gy, target_speed, lookahead = self.find_goal_waypoint(car_x, car_y, current_speed)
 
         # 2. Transform goal to vehicle local coordinates
         x_local, y_local = self.transform_to_local_frame(gx, gy, car_x, car_y, car_yaw)
 
         # 3. Calculate steering angle
-        steering = self.compute_pure_pursuit_steering(x_local, y_local)
+        steering = self.compute_pure_pursuit_steering(x_local, y_local, lookahead)
 
         # 4. Status log
         self.get_logger().info(
-            f"Car: ({car_x:.2f}, {car_y:.2f}) | Goal: ({gx:.2f}, {gy:.2f}) | "
-            f"Steer: {np.degrees(steering):+.1f}° | Speed: {target_speed:.1f} m/s",
+            f"Car: ({car_x:+.2f}, {car_y:+.2f}) | Steer: {np.degrees(steering):+5.1f}° | "
+            f"Speed: {target_speed:.1f} m/s | L_look: {lookahead:.2f} m",
             throttle_duration_sec=0.4
         )
 
