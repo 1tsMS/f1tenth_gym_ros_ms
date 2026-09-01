@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Level 5: Dynamic Overtaking & Trajectory Tracking Agent.
+"""Level 5: Dynamic Overtaking & Trajectory Tracking Agent - Robust State Machine.
 
-Identical to Pure Pursuit by default:
-- 100% stable raceline tracking, zero oscillations, zero false turns.
-- Only engages overtaking when another car directly blocks the driving path (< 1.4m).
-- Seamlessly passes on the open side and snaps right back onto the optimal raceline.
-- Dual-role support: Opponent car (/opp_*) by default, or Ego car (/ego_*).
+Features:
+1. RACELINE Tracking by default (identical to Pure Pursuit).
+2. OVERTAKING State Machine:
+   - When approaching a slower car (< 2.2m ahead), commits to passing lane (Left/Right).
+   - Ramps up speed to 4.0 m/s (Overtake Speed Boost).
+   - Stays locked in the passing lane without swaying until completely past the lead car.
+   - Smoothly re-merges onto the optimal racing line once clear!
+3. Dual-role support: Opponent car (/opp_*) by default, or Ego car (/ego_*).
 """
 
 import os
 import csv
+import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -90,7 +94,7 @@ class DynamicOvertaker(Node):
         )
 
         # --------------------------------------------------
-        # Pure Pursuit & Vehicle Parameters (Matching pure_pursuit.py)
+        # Pure Pursuit Parameters
         # --------------------------------------------------
 
         self.wheelbase = 0.33
@@ -104,11 +108,19 @@ class DynamicOvertaker(Node):
         self.smoothing_alpha = 0.70
         self.prev_steering = 0.0
 
-        # Dynamic Overtaking Parameters
-        self.obstacle_dist_threshold = 1.40   # meters to trigger overtake
-        self.overtake_lateral_offset = 0.50   # lateral shift (meters)
+        # --------------------------------------------------
+        # Overtaking State Machine
+        # --------------------------------------------------
+
+        self.state = "TRACKING"             # "TRACKING" or "OVERTAKING"
+        self.overtake_side = 1.0            # +1.0 = Left lane, -1.0 = Right lane
+        self.overtake_start_time = 0.0
+        self.min_overtake_duration = 1.6    # Minimum seconds to hold pass before re-merging
+        self.detection_dist = 2.20          # Distance to start overtaking (meters)
+        self.overtake_lateral_offset = 0.65 # Passing lane offset (meters)
+        self.overtake_speed = 4.0           # Speed boost during pass (m/s)
+
         self.latest_scan = None
-        self.is_overtaking = False
 
         # --------------------------------------------------
         # Load Waypoints from CSV
@@ -119,7 +131,8 @@ class DynamicOvertaker(Node):
 
         self.get_logger().info(
             f"Dynamic Overtaker Initialized as {role}!\n"
-            f"• Waypoints: {len(self.waypoints)} loaded from: {self.csv_path}"
+            f"• Waypoints: {len(self.waypoints)} loaded from: {self.csv_path}\n"
+            f"• Overtake Boost: {self.overtake_speed} m/s | Detection: {self.detection_dist} m"
         )
 
     # ------------------------------------------------------
@@ -192,7 +205,7 @@ class DynamicOvertaker(Node):
         self.latest_scan = msg
 
     # ------------------------------------------------------
-    # Step 1: Find Goal Waypoint (Identical to Pure Pursuit)
+    # Step 1: Find Goal Waypoint with Anticipatory Braking
     # ------------------------------------------------------
 
     def find_goal_waypoint(self, car_x, car_y, current_speed):
@@ -220,7 +233,6 @@ class DynamicOvertaker(Node):
         gx = self.waypoints[target_idx, 0]
         gy = self.waypoints[target_idx, 1]
 
-        # Anticipatory Braking: Check minimum speed ahead in braking zone
         target_speed = self.waypoints[target_idx, 2]
 
         for offset in range(1, 18):
@@ -231,48 +243,59 @@ class DynamicOvertaker(Node):
         return gx, gy, target_speed, lookahead, target_idx
 
     # ------------------------------------------------------
-    # Step 2: Check for Front Obstacle (Another car directly ahead)
+    # Step 2: Overtaking State Machine
     # ------------------------------------------------------
 
-    def check_front_car(self):
-        """Only returns True if an isolated obstacle is directly in front (<
+    def update_overtaking_state(self):
 
-        1.4m).
-        """
         if self.latest_scan is None:
 
-            return False, 0.0
+            return
 
         ranges = np.asarray(self.latest_scan.ranges, dtype=np.float32)
         n_points = len(ranges)
         angles = self.latest_scan.angle_min + np.arange(n_points) * self.latest_scan.angle_increment
 
-        # Front direct path: -15 to +15 degrees
-        front_mask = (np.abs(angles) <= np.radians(15.0)) & np.isfinite(ranges) & (ranges > 0.20)
+        # Front corridor mask: ±18 degrees directly ahead
+        front_mask = (np.abs(angles) <= np.radians(18.0)) & np.isfinite(ranges) & (ranges > 0.20)
+        front_dist = np.min(ranges[front_mask]) if np.any(front_mask) else 99.0
 
-        if not np.any(front_mask):
+        now = time.monotonic()
 
-            return False, 0.0
+        # STATE TRANSITIONS:
+        if self.state == "TRACKING":
 
-        front_dist = np.min(ranges[front_mask])
+            # If a car is detected ahead on our line (< detection_dist)
+            if front_dist < self.detection_dist:
 
-        # If a car is right in front of us
-        if front_dist < self.obstacle_dist_threshold:
+                # Choose the side with more drivable clearance
+                left_mask = (angles > np.radians(15.0)) & (angles <= np.radians(65.0)) & np.isfinite(ranges)
+                right_mask = (angles < -np.radians(15.0)) & (angles >= -np.radians(65.0)) & np.isfinite(ranges)
 
-            left_mask = (angles > np.radians(15.0)) & (angles <= np.radians(60.0)) & np.isfinite(ranges)
-            right_mask = (angles < -np.radians(15.0)) & (angles >= -np.radians(60.0)) & np.isfinite(ranges)
+                left_space = np.mean(ranges[left_mask]) if np.any(left_mask) else 0.0
+                right_space = np.mean(ranges[right_mask]) if np.any(right_mask) else 0.0
 
-            left_space = np.mean(ranges[left_mask]) if np.any(left_mask) else 0.0
-            right_space = np.mean(ranges[right_mask]) if np.any(right_mask) else 0.0
+                self.overtake_side = 1.0 if left_space >= right_space else -1.0
+                self.state = "OVERTAKING"
+                self.overtake_start_time = now
 
-            side = 1.0 if left_space >= right_space else -1.0
+                self.get_logger().info(
+                    f"🏎️ OVERTAKE INITIATED! Shifting {'LEFT' if self.overtake_side > 0 else 'RIGHT'} | "
+                    f"Ramping speed to {self.overtake_speed} m/s!"
+                )
 
-            return True, side
+        elif self.state == "OVERTAKING":
 
-        return False, 0.0
+            elapsed = now - self.overtake_start_time
+
+            # Only re-merge after minimum passing time AND front path is clear
+            if elapsed > self.min_overtake_duration and front_dist > 2.0:
+
+                self.state = "TRACKING"
+                self.get_logger().info("🏁 OVERTAKE COMPLETE! Re-merging onto optimal raceline.")
 
     # ------------------------------------------------------
-    # Step 3: Pure Pursuit Geometry
+    # Step 3: Pure Pursuit Steering
     # ------------------------------------------------------
 
     def compute_pure_pursuit_steering(self, x_local, y_local, lookahead):
@@ -304,17 +327,15 @@ class DynamicOvertaker(Node):
         car_yaw = self.get_yaw_from_quaternion(msg.pose.pose.orientation)
         current_speed = float(msg.twist.twist.linear.x)
 
-        # 1. Baseline Pure Pursuit Goal Selection
+        # 1. Update Overtaking State Machine
+        self.update_overtaking_state()
+
+        # 2. Get baseline raceline goal
         gx, gy, target_speed, lookahead, target_idx = self.find_goal_waypoint(car_x, car_y, current_speed)
 
-        # 2. Check if a car directly blocks our path ahead (< 1.4m)
-        has_car_ahead, overtake_side = self.check_front_car()
+        # 3. If in OVERTAKING state, hold passing lane and boost speed!
+        if self.state == "OVERTAKING":
 
-        if has_car_ahead:
-
-            self.is_overtaking = True
-
-            # Tangent at waypoint
             num_points = len(self.waypoints)
             next_idx = (target_idx + 4) % num_points
             tx = self.waypoints[next_idx, 0] - gx
@@ -326,40 +347,37 @@ class DynamicOvertaker(Node):
                 nx = -ty / t_norm
                 ny = tx / t_norm
 
-                # Shift waypoint laterally
-                gx += overtake_side * self.overtake_lateral_offset * nx
-                gy += overtake_side * self.overtake_lateral_offset * ny
+                # Shift waypoint into passing lane
+                gx += self.overtake_side * self.overtake_lateral_offset * nx
+                gy += self.overtake_side * self.overtake_lateral_offset * ny
 
-                target_speed = min(target_speed, 2.5)
+                # Power past the moving car with high speed!
+                target_speed = max(target_speed, self.overtake_speed)
 
-        else:
-
-            self.is_overtaking = False
-
-        # 3. Transform goal to vehicle local frame
+        # 4. Transform goal to vehicle body coordinates
         dx = gx - car_x
         dy = gy - car_y
         x_local = dx * np.cos(car_yaw) + dy * np.sin(car_yaw)
         y_local = -dx * np.sin(car_yaw) + dy * np.cos(car_yaw)
 
-        # 4. Pure Pursuit Steering & Smoothing
+        # 5. Pure Pursuit Steering & Smoothing
         raw_steering = self.compute_pure_pursuit_steering(x_local, y_local, lookahead)
         smoothed_steering = (self.smoothing_alpha * self.prev_steering) + ((1.0 - self.smoothing_alpha) * raw_steering)
         self.prev_steering = smoothed_steering
 
-        # 5. Corner speed safety
-        if np.abs(smoothed_steering) > 0.14:
+        # 6. Corner safety: scale speed if steering hard
+        if np.abs(smoothed_steering) > 0.16:
 
-            target_speed = min(target_speed, 1.8)
+            target_speed = min(target_speed, 2.0)
 
-        # 6. Status log
+        # 7. Status log
         self.get_logger().info(
             f"Car: ({car_x:+.2f}, {car_y:+.2f}) | Steer: {np.degrees(smoothed_steering):+5.1f}° | "
-            f"Speed: {target_speed:.1f} m/s | Overtake: {'ACTIVE' if self.is_overtaking else 'OFF'}",
+            f"Speed: {target_speed:.1f} m/s | State: {self.state}",
             throttle_duration_sec=0.4
         )
 
-        # 7. Publish drive command
+        # 8. Publish drive command
         self.publish_drive(
             target_speed,
             smoothed_steering
